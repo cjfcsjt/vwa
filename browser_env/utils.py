@@ -104,3 +104,10 @@ Observation = str | npt.NDArray[np.uint8]
 class StateInfo(TypedDict):
     observation: dict[str, Observation]
     info: Dict[str, Any]
+
+import math
+
+def find_nearest_points(query_point, points, num_nearest=8):
+    # Calculate and sort points by their Euclidean distance to the query_point
+    nearest_points = sorted(points, key=lambda p: math.dist(query_point, p))[:num_nearest]
+    return nearest_points

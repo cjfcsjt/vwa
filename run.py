@@ -137,7 +137,7 @@ def config() -> argparse.Namespace:
         "--eval_captioning_model",
         type=str,
         default="Salesforce/blip2-flan-t5-xl",
-        choices=["Salesforce/blip2-flan-t5-xl"],
+        # choices=["Salesforce/blip2-flan-t5-xl"],
         help="Captioning backbone for VQA-type evals.",
     )
     parser.add_argument(

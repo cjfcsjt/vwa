@@ -14,13 +14,14 @@ from llms.utils import APIInput
 def find_bboxes_containing_point(bboxes, point):
     x_point, y_point = point
     containing_bboxes = []
-    for bbox_id, (x1, y1, x2, y2) in bboxes.items():
+    for bbox_id, (x_c, y_c, w, h) in bboxes.items():
+        x1, x2, y1, y2 = x_c - w/2, x_c + w/2, y_c - h/2, y_c + h/2 
         if x1 <= x_point <= x2 and y1 <= y_point <= y2:
             containing_bboxes.append(bbox_id)
     if len(containing_bboxes)==0:
         return ''
     else:
-        target = ','.joint(containing_bboxes)
+        target = ','.join(containing_bboxes)
         return f"The target element could be {target}"
 
 class Instruction(TypedDict):
@@ -308,7 +309,7 @@ class MultimodalCoTPromptConstructor(CoTPromptConstructor):
 
         obs = state_info["observation"][self.obs_modality]
         element_dict = state_info['info']['observation_metadata']['image']['obs_nodes_info']
-        target_els = find_bboxes_containing_point(element_dict, meta_data['gnd_response'])
+        # target_els = find_bboxes_containing_point(element_dict, meta_data['gnd_response'])
         max_obs_length = self.lm_config.gen_config["max_obs_length"]
         if max_obs_length:
             if self.lm_config.provider == "google":
@@ -325,7 +326,7 @@ class MultimodalCoTPromptConstructor(CoTPromptConstructor):
             url=self.map_url_to_real(url),
             observation=obs,
             previous_action=previous_action_str,
-            target_elements = target_els,
+            target_elements = meta_data['id_response'],
         )
 
         assert all([f"{{k}}" not in current for k in keywords])

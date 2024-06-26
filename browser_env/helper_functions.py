@@ -226,8 +226,12 @@ class RenderHelper(object):
         # meta data
         new_content += f"<div class='prev_action' style='background-color:pink'>{meta_data['action_history'][-1]}</div>\n"
         if 'subtask' in action:
-            new_content += f"<div class='subtask' style='background-color:pink'>{action['subtask']}</div>\n"
-
+            new_content += f"<div class='subtask' style='background-color:blue'>{action['subtask']}</div>\n"
+        if 'choice_prob' in action:
+            choice = ''
+            for c, id in zip(action['choice_prob'], action['ele_id']):
+                choice += f"{id}: {c}'\n'"
+            new_content += f"<div class='subtask' style='background-color:red'>{choice}</div>\n"
         # action
         action_str = get_render_action(
             action,

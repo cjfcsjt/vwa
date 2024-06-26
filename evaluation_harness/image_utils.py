@@ -15,6 +15,21 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import uuid
 import os
 
+def construct_multiple_choice_string(points):
+    multiple_choice_string = ""
+    
+    # Generate labels from 'A' onwards
+    labels = [chr(i) for i in range(ord('A'), ord('A') + len(points) + 1)]
+    
+    for label, point in zip(labels, points):
+        multiple_choice_string += f"\n{label}. <ref>{point}"
+    
+    # Add the last label for "None of the above"
+    last_label = labels[len(points)]
+    multiple_choice_string += f"\n{last_label}. None of the above.\n"
+    
+    return multiple_choice_string
+
 def get_captioning_fn(
     device, dtype, model_name: str = "Salesforce/blip2-flan-t5-xl"
 ) -> callable:
@@ -61,12 +76,17 @@ def get_captioning_fn(
 
     elif 'funcpred' in model_name:
         captioning_model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype, trust_remote_code=True).eval() # load_in_4bit=True
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen-VL-Chat", trust_remote_code=True)
+        # captioning_model_gnd = AutoModelForCausalLM.from_pretrained("/mnt/nvme0n1p1/hongxin_li/seeclick_exp/checkpoints/seeclick_scaling_funcpred625k_llava150k_cauldron197k_refGnd_resample_v2", torch_dtype=dtype, trust_remote_code=True).eval() # load_in_4bit=True
+        tokenizer = AutoTokenizer.from_pretrained("/mnt/nvme0n1p1/hongxin_li/hf_home/hub/models--Qwen--Qwen-VL-Chat/snapshots/f57cfbd358cb56b710d963669ad1bcfb44cdcdd8",  # "/mnt/nvme0n1p1/hongxin_li/hf_home/hub/models--Qwen--Qwen-VL-Chat/snapshots/f57cfbd358cb56b710d963669ad1bcfb44cdcdd8"
+                                                  trust_remote_code=True,
+                                                  multidigit=True,
+                                                  )
         captioning_model.to(device)
-        
+        # captioning_model_gnd.to(device)
         def caption_images(
             images,
             prompt,
+            multiple_choice = None,
             max_new_tokens: int = 32,
         ) -> List[str]:
             query = []
@@ -75,7 +95,13 @@ def get_captioning_fn(
                 name = uuid.uuid4().hex.upper()[0:6]
                 visual.save(f"/tmp/{name}.png")
                 visual_paths.append(f"/tmp/{name}.png")
-            prompt = f"In this web page image, please locate the element based on the \"{prompt}\" (with point)."
+            if multiple_choice is None:
+                prompt = f"In this web page image, please locate the element based on the \"{prompt}\" (with point)."
+                model = captioning_model_gnd
+            else:
+                mc = f"Please select the appropriate answer from the following options, choose \"None of the above\" if none apply:{construct_multiple_choice_string(multiple_choice)}"
+                prompt = f"In this UI design, to process the instruction \"{prompt}\", where should I activate ? {mc}"
+                model = captioning_model
             query.append({"image": visual_paths[0]})
             query.append({"text": prompt})
             questions = tokenizer.from_list_format(query)
@@ -92,10 +118,10 @@ def get_captioning_fn(
             gen_kwargs["pad_token_id"] = 151643
             gen_kwargs["top_k"] = 0
             gen_kwargs["transformers_version"] = "4.36.2"
-            text_output, history = captioning_model.chat(tokenizer, 
-                                                        query=questions, 
-                                                        history=None,
-                                                        **gen_kwargs)
+            text_output, history = model.chat(tokenizer, 
+                                            query=questions, 
+                                            history=None,
+                                            **gen_kwargs)
             for visual_path in visual_paths:
                 try:
                     os.remove(visual_path)
@@ -130,55 +156,75 @@ def get_captioning_fn(
                     {"image": visual_paths[0]},
                     {"text": prompt}
                 ]
-                query = [
+                answer = [
                     {"image": visual_paths[0]},
-                    {"text": prompt + " " + choice}
+                    {"text": choice}
                 ]
                 context_query = tokenizer.from_list_format(context_query)
-                query = tokenizer.from_list_format(query)
+                # answer = tokenizer.from_list_format(answer)
                 raw_contxt_text, context_tokens = make_context(
                 tokenizer, context_query, history=None, system="You are a helpful assistant", max_window_size=captioning_model.generation_config.max_window_size, chat_format=captioning_model.generation_config.chat_format
                 )
-                context_tokens = torch.tensor([context_tokens])
-
-                raw_continuation_text, continuation_tokens = make_context(
-                    tokenizer, query, history=None, system="You are a helpful assistant", max_window_size=captioning_model.generation_config.max_window_size, chat_format=captioning_model.generation_config.chat_format
-                )
+                context_tokens = torch.tensor([context_tokens]).to(captioning_model.device)
                 
-                attn_mask = torch.ones_like(continuation_tokens).to(captioning_model.device)
+                answer_tokens = tokenizer(answer[1]['text'])['input_ids']
+                answer_tokens = torch.tensor([answer_tokens]).to(captioning_model.device)
+                def get_stop_words_ids(chat_format, tokenizer):
+                    if chat_format == "raw":
+                        stop_words_ids = [tokenizer.encode("Human:"), [tokenizer.eod_id]]
+                    elif chat_format == "chatml":
+                        stop_words_ids = [[tokenizer.im_end_id], [tokenizer.im_start_id]]
+                    else:
+                        raise NotImplementedError(f"Unknown chat format {chat_format!r}")
+                    return stop_words_ids
+                stop_words_ids = []
+                stop_words_ids.extend(get_stop_words_ids(
+                    captioning_model.generation_config.chat_format, tokenizer
+                ))
+                stop_words_ids = torch.tensor([[st[0] for st in stop_words_ids]]).to(captioning_model.device)
+                continues_tokens = torch.concat([context_tokens, answer_tokens, stop_words_ids], dim=-1)
+                attn_mask = torch.ones_like(continues_tokens).to(captioning_model.device)
                 
-                labels = continuation_tokens.clone().to(captioning_model.device)
-                labels[:, : context_tokens.shape[1]] = -100 # leaves answer
+                labels = continues_tokens.clone().to(captioning_model.device)
+                labels[:, : context_tokens.shape[1]] = -100
                 
                 with torch.inference_mode():
-                    outputs = captioning_model(input_ids=continuation_tokens, labels=labels, attention_mask=attn_mask)
+                    outputs = captioning_model(input_ids=continues_tokens, labels=labels, attention_mask=attn_mask)
                 loss = outputs.loss
-                logits = outputs["logits"]
+                logits = outputs["logits"] # 预测下一个token
+                probs = logits.softmax(dim=-1).detach()
                 # greedy_tokens = logits.argmax(dim=-1)
-                answer_logits = logits[:, context_tokens.shape[1] : continuation_tokens.shape[1]]  # [1, seq]
-                for i in range(len(choice)):
-                    if choice[i] == ',' or ')' or ')':
+                gen_probs = torch.gather(probs, 2, continues_tokens[:, :, None]).squeeze(-1)
+                answer_logits = logits[:, context_tokens.shape[1] : continues_tokens.shape[1]]  # [1, seq]
+                text_sequence = []
+                for i in range(context_tokens.shape[1], continues_tokens.shape[1]):
+                    next_tokens_prob = probs[0, i - 1, :]
+                    next_token_id = continues_tokens[0, i]
+                    if next_token_id in [151857, 151858,151859,151644,151645]:
                         continue
-                    index = tokenizer(choice[i])['input_ids'][0]
-                    logit = logits[0, index]
-                    choice_prob.append(logit)
-            
+                    text_sequence.append((tokenizer.decode(next_token_id), next_tokens_prob[next_token_id].item()))
+                # for token, p in zip(continues_tokens[0, context_tokens.shape[1]-1:-1], gen_probs[0, context_tokens.shape[1]:]):
+                #     if token in [151857, 151858,151859,151644,151645]: # 7: '(', 8: ')', 11: ',' 
+                #         continue
+                #     text_sequence.append((tokenizer.decode(token),p.item()))
+                prod = 0
+                for i in text_sequence:
+                    prod += i[1] 
+                choice_prob.append(prod)
             for visual_path in visual_paths:
                 try:
                     os.remove(visual_path)
                 except:
                     pass
-            probs = 1
-            for i in range(len(choice_prob)):
-                probs = probs * choice_prob[i]
-            return probs
+            index = choice_prob.index(max(choice_prob))
+            return choice_prob # multiple_choice[index]
 
     else:
         raise NotImplementedError(
             "Only BLIP-2 models are currently supported"
         )
 
-    return caption_images
+    return logits
 
 
 def get_image_ssim(imageA, imageB):
